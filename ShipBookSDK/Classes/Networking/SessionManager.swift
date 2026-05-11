@@ -42,8 +42,10 @@ let config = """
 """
 
 class SessionManager {
-  
+
   private var isInLoginRequest: Bool = false
+  // Set when loginSdk got a 4xx — integration is wrong (bad appId/appKey, app deleted, etc.). Retrying won't fix it; suppress further attempts in this process so we don't hammer the server.
+  private var loginFailedPermanently: Bool = false
   let configURL: URL
   let dirURL: URL
   var appKey: String?
@@ -68,6 +70,7 @@ class SessionManager {
   var connected: Bool {
     get {
       if token != nil { return true }
+      if loginFailedPermanently { return false }
       innerLogin()
       return false
     }
@@ -103,10 +106,10 @@ class SessionManager {
     self.loginCompletion = completion
     self.login = Login(appId: appId,
                        appKey: appKey)
-    
+    self.loginFailedPermanently = false
     self.innerLogin()
   }
-  
+
   func logout() {
     DispatchQueue.shipBook.async {
       self.token = nil
@@ -161,10 +164,10 @@ class SessionManager {
   }
   
   private func innerLogin() {
-    if !Reachability.isConnectedToNetwork() || isInLoginRequest || appKey == nil { return }
+    if !Reachability.isConnectedToNetwork() || isInLoginRequest || appKey == nil || loginFailedPermanently { return }
     isInLoginRequest = true
     let url = "auth/loginSdk"
-    
+
     login?.deviceTime = Date()
     ConnectionClient.shared.request(url: url, data: login, method: HttpMethod.POST) { response in
       DispatchQueue.shipBook.async {
@@ -176,12 +179,12 @@ class SessionManager {
             }
             let login = try ConnectionClient.jsonDecoder.decode(LoginResponse.self, from: response.data!)
             self.token = login.token
-            
+
             self.loginCompletion?(login.sessionUrl)
-            
+
             LogManager.shared.config(login.config)
             NotificationCenter.default.post(name: NotificationName.Connected, object: self)
-            
+
             // saving the config to a file. need to do an hack because there is no way to encode String:any with encode
             let jsonObject = try JSONSerialization.jsonObject(with: response.data!) as! [String:Any]
             let configData =  try JSONSerialization.data(withJSONObject: jsonObject["config"]!)
@@ -193,7 +196,12 @@ class SessionManager {
               InnerLog.e("the info that was received" + String(data: data, encoding: String.Encoding.utf8)!)
             }
           }
-          
+
+        }
+        else if (400...499).contains(response.statusCode) {
+          // 4xx on loginSdk = integration error (bad appId/appKey, app deleted). Retrying won't help — stop until the app is restarted or logout/login is called.
+          self.loginFailedPermanently = true
+          InnerLog.e("loginSdk rejected with \(response.statusCode) — check appId/appKey. Will not retry until next app start.")
         }
         else {
           InnerLog.e("the response not ok")
