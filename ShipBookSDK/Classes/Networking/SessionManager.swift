@@ -226,8 +226,7 @@ class SessionManager {
       self.isInLoginRequest = false
       if response.ok {
         guard response.data != nil else {
-          InnerLog.e("missing data")
-          self.token = refresh.token; // there is an error the refresh token should be called again.
+          InnerLog.e("missing data on refresh — leaving token nil so the next cycle falls back to a fresh loginSdk")
           completionHandler(false)
           return
         }
@@ -235,8 +234,15 @@ class SessionManager {
         self.token = refreshResp?.token
         completionHandler(true)
       }
+      else if (400...499).contains(response.statusCode) {
+        // 4xx on refresh = integration error (app deleted, wrong appKey, bad JWT). Same as loginSdk failure — stop retrying until next app start.
+        self.loginFailedPermanently = true
+        InnerLog.e("refreshSdkToken rejected with \(response.statusCode) — check appId/appKey. Will not retry until next app start.")
+        completionHandler(false)
+      }
       else {
-        self.token = refresh.token; // there is an error the refresh token should be called again.
+        // 5xx / network — leave token nil. SBCloudAppender's next send sees connected=false and fires innerLogin (fresh login), which is the right recovery for transient errors.
+        InnerLog.e("refreshSdkToken failed (status \(response.statusCode)) — will fall back to fresh login on next cycle")
         completionHandler(false)
       }
     }
